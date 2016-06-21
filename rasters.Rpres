@@ -1,0 +1,259 @@
+<style>
+.small-code pre code {
+  font-size: 1em;
+}
+</style>
+
+<style>
+.tiny-code pre code {
+  font-size: 0.5em;
+}
+</style>
+
+```{r setup, include=FALSE}
+#opts_chunk$set(cache=TRUE)
+```
+
+Rasters and R
+========================================================
+author: James Durant, MSPH CIH
+date: 6/30/2016
+font-family: 'Helvetica'
+
+CDC ATSDR R Users Group Meeting
+
+Motivation
+========================================================
+
+Need to model chemical exposures in ambient air using
+EPA's air dispersion model AERMOD
+
+- Need to process national elevation data (NED) using AERMAP 
+- Need to process landuse data from National Land Cover Database (NLCD 1992) using AERSURFACE
+- Sometimes the model domain overlays multiple raster tiles
+- Goal is to use R to mosiac rasters, then clip to domain of interest
+then export to usable format by AERMAP and AERSURFACE. 
+
+
+What are rasters?
+========================================================
+- Basically, it is a matrix of pixels
+- Each pixel takes a value that can represent 'something'
+ * in photography this would be a color
+ * with national elevation data this would be elevation
+ * with NLCD would be land use classification
+
+- In a GIS you will need additional information about extent, projection, etc.
+- In R, rasters are supported in the package *raster*  
+```{r, eval=FALSE}
+vignette("Raster")
+```
+
+AERMAP case
+========================================================
+![alt text](./img/nationalmap.jpg)
+***
+- Hayden, AZ
+- Site with lead emissions, air monitors, and biological specimens for metals
+- 2 map tiles needed (imgn33w111_13.img and imgn34w111_13.img)
+- Need to convert to GeoTIFF
+- Figure out domain in UTM from point data in WGS1984
+- National Elevation Data (NED) 1/3 arc second resolution can be downloaded from http://nationalmap.gov/viewer.html 
+
+Reading Rasters into R
+========================================================
+class:small-code
+```{r, echo=TRUE}
+library(sp)
+library(rgdal)
+library(raster)
+library(plotKML)
+library(lattice)
+myFile1 <- "./data/imgn33w111_13.img"
+myFile2 <- "./data/imgn34w111_13.img"
+
+ned_33w111_13 <- raster(myFile1)
+ned_34w111_13 <- raster(myFile2)
+```
+
+- note that files are stored 'on disk' by default (saves memory)
+
+
+Reading Rasters into R
+========================================================
+class:tiny-code
+```{r, echo=TRUE}
+str(ned_33w111_13)
+```
+
+Reading Rasters into R
+========================================================
+class:tiny-code
+```{r, echo=TRUE, cache=TRUE}
+plot(ned_33w111_13)
+```
+***
+```{r, echo=TRUE, cache=TRUE}
+plot(ned_34w111_13)
+```
+
+
+Reading Point Data into R
+========================================================
+class:small-code
+```{r, echo=TRUE}
+set.seed(1)
+people <- data.frame(Longitude  = runif(50, -110.8, -110.7), 
+                     Latitude = runif(50, 32.95, 33.01))
+
+monitors <- read.csv("./data/Station_locations.csv")
+sources <- read.csv("./data/sources.csv")
+
+names(monitors)[names(monitors) %in% c("longitude", "latitude")] <- c("Longitude", "Latitude")
+monitors <- monitors[c("Longitude", "Latitude")]
+sources <- sources[c("Longitude", "Latitude")]
+people$type <- "People" ; monitors$type <- "Monitor" ; sources$type <- "Source"
+
+mergePoints <- plyr::rbind.fill(list(people, monitors,sources))
+mergePoints$type <-as.factor(mergePoints$type)
+head(mergePoints)
+```
+- create data.frame class with point data 
+
+
+Converting into Spatial Objects 
+========================================================
+class:small-code
+```{r, echo=TRUE, fig=TRUE}
+coordinates(mergePoints) <- c("Longitude", "Latitude")
+proj4string(mergePoints) <- CRS("+init=epsg:4326")
+mergePoints2 <- spTransform(mergePoints, CRS(proj4string(ned_33w111_13)))
+
+spplot(mergePoints2, scales=list(draw=TRUE))
+```
+***
+ - coordinates() coerces data.frame to SpatialPointsDataFrame object
+ - proj4string adds spatial information
+ - spTransform changes projection to match my rasters
+ 
+ 
+ 
+Getting bounding box from points 
+========================================================
+class:small-code
+```{r, echo=TRUE}
+ as.SpatialPolygons.bbox <- function( bbox, proj4stringFrom=CRS("+proj=longlat +datum=WGS84"), proj4stringTo=NULL ) {
+  # Create unprojected bbox as spatial object
+    bboxMat <- rbind( c(bbox['Longitude','min'],bbox['Latitude','min']),
+                     c(bbox['Longitude','min'],bbox['Latitude','max']),
+                     c(bbox['Longitude','max'],bbox['Latitude','max']),
+                     c(bbox['Longitude','max'],bbox['Latitude','min']),
+                     c(bbox['Longitude','min'],bbox['Latitude','min']) ) # clockwise, 5 points to close it
+    bboxSP <- SpatialPolygons( list(Polygons(list(Polygon(bboxMat)),"bbox")),
+                              proj4string=proj4stringFrom  )
+
+    if(!is.null(proj4stringTo)) {
+    bboxSP <- spTransform( bboxSP, proj4stringTo )
+  }
+  bboxSP
+}
+
+merge.bbox <- bbox(mergePoints)         #get bounding box of point data
+merge.bbox[1,1] <- merge.bbox[1,1] - 0.01 #add 0.01 degree to bounding box
+merge.bbox[2,1] <- merge.bbox[2,1]  -0.01
+merge.bbox[1,2] <- merge.bbox[1,2] + 0.01
+merge.bbox[2,2] <- merge.bbox[2,2] + 0.01
+
+model.domain <- as.SpatialPolygons.bbox(merge.bbox)
+model.domain
+```
+
+Getting bounding box from points (adding margin) 
+========================================================
+class:small-code
+```{r, echo=TRUE}
+clip.bbox <- merge.bbox
+clip.bbox[1,1] <- merge.bbox[1,1] - 0.01
+clip.bbox[2,1] <- merge.bbox[2,1] - 0.01
+clip.bbox[1,2] <- merge.bbox[1,2] + 0.01
+clip.bbox[2,2] <- merge.bbox[2,2] + 0.01
+
+clip.domain <- as.SpatialPolygons.bbox(clip.bbox)
+plot(clip.domain, axes=TRUE)
+plot(model.domain, add=TRUE)
+```
+
+
+
+Merging and Cropping 
+========================================================
+class:small-code
+```{r}
+ned_merged <- 
+merge(crop(ned_33w111_13, clip.domain) , 
+      crop(ned_34w111_13, clip.domain))
+
+plot(ned_merged, col = terrain.colors(10))
+plot(clip.domain, add=TRUE)
+plot(model.domain, add=TRUE)
+```
+
+
+Ground Truthing with plotKML 
+========================================================
+class:small-code
+```{r}
+oldDir <- getwd()
+setwd("./output")
+proj4string(ned_merged) <- CRS(paste(proj4string(ned_merged), "datum=NAD83", sep=" +"))
+kml(ned_merged, colour=layer, folder.name="hayden_elevation",
+    file.name="hayden_elevation.kml")
+kml(mergePoints, colour=mergePoints$type, file.name="hayden_receptors.kml")
+
+```
+
+Exporting TIFF file and UTM coordinates 
+========================================================
+class:small-code
+```{r}
+writeRaster(ned_merged, filename = "./hayden_ned.tif",
+            options=c("COMPRESS=NONE", "TFW=YES"), overwrite=TRUE)
+
+desc_receptors <- spTransform(mergePoints, CRS("+proj=utm +zone=12 +datum=WGS84"))
+receptors <- coordinates(desc_receptors)
+
+monitors <- receptors[mergePoints@data == "Monitor",]
+people <- receptors[mergePoints@data == "People",]
+people <- unique(people)
+
+
+monitors <- apply(monitors, 1, 
+                  function(x) paste(round(x,0), collapse=" "))
+people <- apply(people, 1, 
+                function(x) paste(round(x,0), collapse=" "))
+
+monitors <- paste("   DISCCART   ", monitors)
+people <- paste("   DISCCART   ", people)
+
+writeLines(monitors, "monitor_recpt.txt")
+writeLines(people, "people_recpt.txt")
+
+# get spatial extent of model domain
+model.domain.utm <- spTransform(model.domain, CRS("+proj=utm +zone=12 +datum=WGS84"))
+write(bbox(model.domain.utm), "model_domain.txt")
+
+setwd(oldDir)
+
+```
+
+Closing
+========================================================
+class:small-code
+
+Resources:
+- https://www.nceas.ucsb.edu/~frazier/RSpatialGuides/OverviewCoordinateReferenceSystems.pdf
+- http://www.maths.lancs.ac.uk/~rowlings/Teaching/UseR2012/introduction2Talk.html
+- http://neondataskills.org/R/Raster-Data-In-R/
+
+Special thanks:
+- Dr. A. Jo Williams-Newkirk (http://git.biotech.cdc.gov/igy7/r_map_class)
